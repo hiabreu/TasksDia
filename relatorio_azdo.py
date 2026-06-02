@@ -34,7 +34,8 @@ BRT = timezone(timedelta(hours=-3))  # America/Sao_Paulo (sem horário de verão
 CARD_TYPES = {"Product Backlog Item", "User Story", "Bug", "Feature", "Issue"}
 FIELDS = ",".join([
     "System.Id", "System.Title", "System.State", "System.WorkItemType",
-    "System.ChangedDate", "System.TeamProject", "System.Parent",
+    "System.ChangedDate", "System.ChangedBy", "System.CreatedDate",
+    "System.CreatedBy", "System.TeamProject", "System.Parent",
 ])
 
 if not PAT:
@@ -74,11 +75,11 @@ def get_items(ids):
 # Coleta de dados
 # ----------------------------------------------------------------------------
 def coletar():
-    # 1. IDs movimentados hoje (query cobre toda a organização)
+    # 1. IDs criados OU movimentados hoje por mim (query cobre toda a organização)
     wiql = {"query": (
         "SELECT [System.Id] FROM WorkItems "
-        f"WHERE [System.ChangedBy] = '{USER}' "
-        "AND [System.ChangedDate] >= @today "
+        f"WHERE (([System.ChangedBy] = '{USER}' AND [System.ChangedDate] >= @today) "
+        f"OR ([System.CreatedBy] = '{USER}' AND [System.CreatedDate] >= @today)) "
         "ORDER BY [System.ChangedDate] DESC"
     )}
     res = api("POST", "_apis/wit/wiql?api-version=6.0", wiql)
@@ -120,6 +121,29 @@ def fmt_dt(s):
     return dt.strftime("%d/%m/%Y %H:%M")
 
 
+def unique_name(v):
+    """Extrai o e-mail (uniqueName) de um campo de identidade da API."""
+    return v.get("uniqueName", "") if isinstance(v, dict) else (v or "")
+
+
+def is_today_brt(s):
+    """True se a data ISO informada cai no dia de hoje (horário BRT)."""
+    if not s:
+        return False
+    dt = datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(BRT)
+    return dt.date() == datetime.now(BRT).date()
+
+
+def created_today_by_me(cache, i):
+    return (is_today_brt(field(cache, i, "System.CreatedDate"))
+            and unique_name(field(cache, i, "System.CreatedBy")) == USER)
+
+
+def changed_today_by_me(cache, i):
+    return (is_today_brt(field(cache, i, "System.ChangedDate"))
+            and unique_name(field(cache, i, "System.ChangedBy")) == USER)
+
+
 def card_of(cache, i):
     """Sobe a hierarquia até o primeiro item tipo-card; senão, usa o pai direto."""
     if field(cache, i, "System.WorkItemType") in CARD_TYPES:
@@ -133,8 +157,18 @@ def card_of(cache, i):
     return field(cache, i, "System.Parent") or i
 
 
+def marca(cache, i):
+    """Retorna o marcador do item: ✚ criada, ★ movida ou espaço."""
+    if created_today_by_me(cache, i):
+        return "✚"
+    if changed_today_by_me(cache, i):
+        return "★"
+    return " "
+
+
 def gerar_relatorio(today_ids, cache):
     today_set = set(today_ids)
+    created_set = {i for i in today_ids if created_today_by_me(cache, i)}
     groups = {}
     for i in today_ids:
         groups.setdefault(card_of(cache, i), []).append(i)
@@ -158,17 +192,22 @@ def gerar_relatorio(today_ids, cache):
     for card, ids in ordenado:
         proj = field(cache, card, "System.TeamProject")
         projetos.add(proj)
-        moved = "★ movido hoje" if card in today_set else "contexto (não movido hoje)"
+        if card in created_set:
+            situacao = "✚ criado hoje"
+        elif card in today_set:
+            situacao = "★ movido hoje"
+        else:
+            situacao = "contexto (não movido hoje)"
         epic = field(cache, card, "System.Parent")
         epic_txt = (f" | Epic: #{epic} {field(cache, epic, 'System.Title')}"
                     if epic in cache else "")
         L.append(f"Projeto: {proj}")
         L.append(f"┌─ CARD #{card} [{field(cache, card, 'System.WorkItemType')}] "
-                 f"· {field(cache, card, 'System.State')} · {moved}")
+                 f"· {field(cache, card, 'System.State')} · {situacao}")
         L.append(f"│  {field(cache, card, 'System.Title')}{epic_txt}")
         L.append("│")
         for i in sorted(c for c in ids if c != card):
-            m = "★" if i in today_set else " "
+            m = marca(cache, i)
             L.append(f"│  {m} #{i:<6} [{field(cache, i, 'System.WorkItemType'):<5}] "
                      f"{field(cache, i, 'System.State'):<22} "
                      f"{field(cache, i, 'System.Title')[:46]}")
@@ -178,10 +217,14 @@ def gerar_relatorio(today_ids, cache):
             L.append(f"└─ Última movimentação: {fmt_dt(max(movs))} (BRT)")
         L.append("")
 
+    n_criadas = len(created_set)
+    n_movidas = len(today_set - created_set)
     L.append("=" * 64)
-    L.append(f"Total geral: {len(today_ids)} tarefa(s) movimentada(s) "
+    L.append(f"Total geral: {len(today_ids)} tarefa(s) hoje "
+             f"({n_criadas} criada(s), {n_movidas} movimentada(s)) "
              f"em {len(projetos)} projeto(s)")
-    L.append("★ = movido hoje · CARD sem ★ = pai trazido como contexto")
+    L.append("✚ = criada hoje · ★ = movida hoje · "
+             "CARD sem marca = pai trazido como contexto")
     L.append("=" * 64)
     return "\n".join(L)
 
