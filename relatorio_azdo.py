@@ -233,7 +233,12 @@ def gerar_relatorio(today_ids, cache):
         if epic_txt:
             L.append(f"│  {epic_txt}")
 
-        tasks_sorted = sorted(task_list, key=lambda i: field(cache, i, "System.ChangedDate") or "")
+        # Ordena: não-Tasks (Ticket, etc.) primeiro; Tasks recuadas abaixo
+        def sort_key(i):
+            is_task = field(cache, i, "System.WorkItemType") == "Task"
+            return (is_task, field(cache, i, "System.ChangedDate") or "")
+
+        tasks_sorted = sorted(task_list, key=sort_key)
         if tasks_sorted:
             L.append("│")
             for i in tasks_sorted:
@@ -242,7 +247,8 @@ def gerar_relatorio(today_ids, cache):
                 state = field(cache, i, "System.State")
                 title = field(cache, i, "System.Title")[:50]
                 hora = fmt_time(field(cache, i, "System.ChangedDate"))
-                L.append(f"│  {m} #{i:<6} [{wtype:<6}] {state:<24} {hora}  {title}")
+                indent = "│     " if wtype == "Task" else "│  "
+                L.append(f"{indent}{m} #{i:<6} [{wtype:<6}] {state:<24} {hora}  {title}")
 
         L.append("└" + "─" * 63)
         L.append("")
