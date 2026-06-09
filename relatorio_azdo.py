@@ -166,15 +166,35 @@ def marca(cache, i):
     return " "
 
 
+def fmt_time(s):
+    """Retorna apenas HH:MM (BRT) de uma data ISO."""
+    if not s:
+        return "—"
+    dt = datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(BRT)
+    return dt.strftime("%H:%M")
+
+
 def gerar_relatorio(today_ids, cache):
     today_set = set(today_ids)
     created_set = {i for i in today_ids if created_today_by_me(cache, i)}
-    groups = {}
-    for i in today_ids:
+
+    # Separa tasks/tickets (não-card) dos cards movidos diretamente
+    task_ids = [i for i in today_ids
+                if field(cache, i, "System.WorkItemType") not in CARD_TYPES]
+    moved_card_ids = [i for i in today_ids
+                      if field(cache, i, "System.WorkItemType") in CARD_TYPES]
+
+    # Agrupa tasks pelo card pai
+    groups: dict[int, list[int]] = {}
+    for i in task_ids:
         groups.setdefault(card_of(cache, i), []).append(i)
 
+    # Cards movidos sem tasks filhas hoje aparecem como entrada sozinha
+    for cid in moved_card_ids:
+        groups.setdefault(cid, [])
+
     now = datetime.now(BRT)
-    L = []  # linhas do relatório
+    L = []
     L.append("=" * 64)
     L.append(f"SESSÃO DO DIA - {now.strftime('%d/%m/%Y')} {now.strftime('%H:%M')} (BRT)")
     L.append(f"Usuário: {USER}")
@@ -189,42 +209,53 @@ def gerar_relatorio(today_ids, cache):
     projetos = set()
     ordenado = sorted(groups.items(),
                       key=lambda kv: (field(cache, kv[0], "System.TeamProject"), kv[0]))
-    for card, ids in ordenado:
+
+    for card, task_list in ordenado:
         proj = field(cache, card, "System.TeamProject")
         projetos.add(proj)
-        if card in created_set:
-            situacao = "✚ criado hoje"
-        elif card in today_set:
-            situacao = "★ movido hoje"
-        else:
-            situacao = "contexto (não movido hoje)"
+
+        card_type = field(cache, card, "System.WorkItemType")
+        card_state = field(cache, card, "System.State")
+        card_title = field(cache, card, "System.Title")
         epic = field(cache, card, "System.Parent")
-        epic_txt = (f" | Epic: #{epic} {field(cache, epic, 'System.Title')}"
+        epic_txt = (f"  Epic: #{epic} · {field(cache, epic, 'System.Title')}"
                     if epic in cache else "")
+
+        card_mark = ""
+        if card in created_set:
+            card_mark = "  ✚ criado hoje"
+        elif card in today_set:
+            card_mark = "  ★ movido hoje"
+
         L.append(f"Projeto: {proj}")
-        L.append(f"┌─ CARD #{card} [{field(cache, card, 'System.WorkItemType')}] "
-                 f"· {field(cache, card, 'System.State')} · {situacao}")
-        L.append(f"│  {field(cache, card, 'System.Title')}{epic_txt}")
-        L.append("│")
-        for i in sorted(c for c in ids if c != card):
-            m = marca(cache, i)
-            L.append(f"│  {m} #{i:<6} [{field(cache, i, 'System.WorkItemType'):<5}] "
-                     f"{field(cache, i, 'System.State'):<22} "
-                     f"{field(cache, i, 'System.Title')[:46]}")
-        movs = [field(cache, i, "System.ChangedDate") for i in ids if i in today_set]
-        if movs:
+        L.append(f"┌─ Card #{card} [{card_type}] · {card_state}{card_mark}")
+        L.append(f"│  {card_title}")
+        if epic_txt:
+            L.append(f"│  {epic_txt}")
+
+        tasks_sorted = sorted(task_list, key=lambda i: field(cache, i, "System.ChangedDate") or "")
+        if tasks_sorted:
             L.append("│")
-            L.append(f"└─ Última movimentação: {fmt_dt(max(movs))} (BRT)")
+            for i in tasks_sorted:
+                m = marca(cache, i)
+                wtype = field(cache, i, "System.WorkItemType")
+                state = field(cache, i, "System.State")
+                title = field(cache, i, "System.Title")[:50]
+                hora = fmt_time(field(cache, i, "System.ChangedDate"))
+                L.append(f"│  {m} #{i:<6} [{wtype:<6}] {state:<24} {hora}  {title}")
+
+        L.append("└" + "─" * 63)
         L.append("")
 
-    n_criadas = len(created_set)
-    n_movidas = len(today_set - created_set)
+    n_tasks = len(task_ids)
+    n_criadas = len([i for i in task_ids if i in created_set])
+    n_movidas = n_tasks - n_criadas
+    n_cards_mov = len([c for c in moved_card_ids if c not in created_set])
     L.append("=" * 64)
-    L.append(f"Total geral: {len(today_ids)} tarefa(s) hoje "
-             f"({n_criadas} criada(s), {n_movidas} movimentada(s)) "
-             f"em {len(projetos)} projeto(s)")
-    L.append("✚ = criada hoje · ★ = movida hoje · "
-             "CARD sem marca = pai trazido como contexto")
+    L.append(f"Tasks hoje: {n_tasks} ({n_criadas} criada(s), {n_movidas} movimentada(s))"
+             + (f"  |  Cards movidos: {n_cards_mov}" if n_cards_mov else ""))
+    L.append(f"Projetos: {len(projetos)}  |  Cards pai: {len(groups)}")
+    L.append("✚ = criada hoje  ·  ★ = movida hoje")
     L.append("=" * 64)
     return "\n".join(L)
 
